@@ -3029,27 +3029,32 @@ class AIAgent:
                 elif isinstance(msg.get("tool_calls"), list):
                     tool_calls_data = msg["tool_calls"]
                 
-                # Validate tool_calls JSON before persisting (#12731)
-                # Detect truncated/corrupted arguments and repair or reject them
+                # Validate tool_calls JSON before persisting (#12731).
+                # Covers both dict shapes produced above: nested {"function": {...}}
+                # and flat {"name", "arguments"}.
                 if tool_calls_data:
                     validated_tool_calls = []
                     for tc in tool_calls_data:
-                        if isinstance(tc, dict) and "function" in tc:
-                            args = tc["function"].get("arguments", "")
-                            if args:
-                                try:
-                                    json.loads(args)
-                                except (json.JSONDecodeError, TypeError):
-                                    # Arguments are invalid JSON — try to repair
-                                    repaired = _repair_tool_call_arguments(args, tc["function"].get("name", "?"))
+                        if not isinstance(tc, dict):
+                            validated_tool_calls.append(tc)
+                            continue
+                        fn = tc["function"] if isinstance(tc.get("function"), dict) else tc
+                        args = fn.get("arguments", "")
+                        if args:
+                            try:
+                                json.loads(args)
+                            except (json.JSONDecodeError, TypeError):
+                                name = fn.get("name", "?")
+                                repaired = _repair_tool_call_arguments(args, name)
+                                if fn is tc:
+                                    tc = {**tc, "arguments": repaired}
+                                else:
                                     tc = {**tc, "function": {**tc["function"], "arguments": repaired}}
-                                    logger.warning(
-                                        "Repaired corrupted tool_call arguments for %s before session flush",
-                                        tc["function"].get("name", "?"),
-                                    )
-                            validated_tool_calls.append(tc)
-                        else:
-                            validated_tool_calls.append(tc)
+                                logger.warning(
+                                    "Repaired corrupted tool_call arguments for %s before session flush",
+                                    name,
+                                )
+                        validated_tool_calls.append(tc)
                     tool_calls_data = validated_tool_calls
                 
                 self._session_db.append_message(
